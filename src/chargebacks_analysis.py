@@ -4,7 +4,7 @@ import seaborn as sns
 from sqlalchemy import create_engine
 
 # Load dataset (replace with your dataset path)
-dataset_path = 'data/raw/chargebacks_dataset.csv'
+dataset_path = '../data/raw/chargebacks_dataset.csv'
 data = pd.read_csv(dataset_path)
 
 # Perform data cleaning and preprocessing
