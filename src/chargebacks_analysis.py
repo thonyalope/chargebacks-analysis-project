@@ -1,71 +1,112 @@
 import pandas as pd
+import numpy as np
+import pyodbc
 import matplotlib.pyplot as plt
-import seaborn as sns
-from sqlalchemy import create_engine
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-try:
-    # Load datasets
-    logging.info('Loading datasets...')
-    orders_path = '../data/olist_orders_dataset.csv'
-    payments_path = '../data/olist_order_payments_dataset.csv'
-    customers_path = '../data/olist_customers_dataset.csv'
-    orders = pd.read_csv(orders_path)
-    payments = pd.read_csv(payments_path)
-    customers = pd.read_csv(customers_path)
-
-    # Merge datasets on 'order_id' and 'customer_id'
-    logging.info('Merging datasets...')
+def generate_chargebacks(orders, payments, customers):
     orders_payments = pd.merge(orders, payments, on='order_id')
-    data = pd.merge(orders_payments, customers, on='customer_id')
+    orders_payments['chargeback_status'] = np.random.choice(
+        ['None', 'Requested', 'Denied', 'Approved'],
+        size=len(orders_payments),
+        p=[0.9, 0.03, 0.04, 0.03]
+    )
+    chargebacks = orders_payments[orders_payments['chargeback_status'] != 'None']
+    chargebacks = pd.merge(chargebacks, customers, on='customer_id')
+    chargebacks = chargebacks.rename(columns={
+        'order_id': 'transaction_id',
+        'payment_value': 'amount',
+        'order_purchase_timestamp': 'transaction_date',
+        'chargeback_status': 'status',
+        'customer_city': 'city',
+        'customer_state': 'state'
+    })
+    chargebacks = chargebacks[['transaction_id', 'customer_id', 'transaction_date', 'amount', 'status', 'city', 'state']]
+    chargebacks.to_csv('data/processed/chargebacks_cleaned.csv', index=False)
 
-    # Simulate chargebacks: Consider orders with status 'canceled' as chargebacks
-    logging.info('Simulating chargebacks...')
-    data['is_chargeback'] = data['order_status'].apply(lambda x: 1 if x == 'canceled' else 0)
+def generate_unsettled_transactions(orders, payments, customers):
+    orders_payments = pd.merge(orders, payments, on='order_id')
+    orders_payments['unsettled_status'] = np.random.choice(
+        ['Settled', 'Pending', 'Failed'],
+        size=len(orders_payments),
+        p=[0.85, 0.1, 0.05]
+    )
+    unsettled_transactions = orders_payments[orders_payments['unsettled_status'] != 'Settled']
+    unsettled_transactions = pd.merge(unsettled_transactions, customers, on='customer_id')
+    unsettled_transactions = unsettled_transactions.rename(columns={
+        'order_id': 'transaction_id',
+        'payment_value': 'amount',
+        'order_purchase_timestamp': 'transaction_date',
+        'unsettled_status': 'status',
+        'customer_city': 'city',
+        'customer_state': 'state'
+    })
+    unsettled_transactions = unsettled_transactions[['transaction_id', 'customer_id', 'transaction_date', 'amount', 'status', 'city', 'state']]
+    unsettled_transactions.to_csv('data/processed/unsettled_transactions_cleaned.csv', index=False)
 
-    # Filter only chargeback transactions
-    chargebacks_data = data[data['is_chargeback'] == 1]
+def connect_to_db():
+    conn = pyodbc.connect('DRIVER={SQL Server};'
+                          'SERVER=your_server_name;'
+                          'DATABASE=TransactionAnalysis;'
+                          'Trusted_Connection=yes;')
+    return conn
 
-    # Perform data cleaning and preprocessing
-    chargebacks_data.dropna(inplace=True)
+def load_data_to_db(file_path, table_name):
+    conn = connect_to_db()
+    cursor = conn.cursor()
+    df = pd.read_csv(file_path)
+    for index, row in df.iterrows():
+        cursor.execute(f"""
+            INSERT INTO {table_name} (transaction_id, customer_id, transaction_date, amount, status, city, state)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            row.transaction_id, row.customer_id, row.transaction_date, row.amount, row.status, row.city, row.state)
+    conn.commit()
+    cursor.close()
+    conn.close()
 
-    # Exploratory Data Analysis (EDA) for chargebacks only
-    logging.info('Performing Exploratory Data Analysis...')
-    plt.figure(figsize=(10, 6))
-    sns.histplot(chargebacks_data['payment_value'], bins=50, kde=True)
-    plt.title('Distribution of Payment Values for Chargebacks')
-    plt.xlabel('Payment Value')
-    plt.ylabel('Count')
-    plt.show()
+def run_query(query):
+    conn = connect_to_db()
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
 
-    # Distribution of chargebacks over time
-    plt.figure(figsize=(10, 6))
-    sns.histplot(pd.to_datetime(chargebacks_data['order_purchase_timestamp']), bins=50, kde=True)
-    plt.title('Distribution of Chargebacks Over Time')
-    plt.xlabel('Order Purchase Timestamp')
-    plt.ylabel('Count')
-    plt.show()
-
-    # SQL Database Integration
-    logging.info('Integrating with SQL Database...')
-    engine = create_engine('mssql+pyodbc://username:password@server/ChargebacksDB')
-    chargebacks_data.to_sql('Transactions', con=engine, if_exists='replace', index=False)
-
-    # Analysis and Insights for chargebacks only
-    logging.info('Running SQL Queries...')
+def plot_chargeback_by_country():
     query = """
-    SELECT payment_type, buyer_city, COUNT(*) AS PaymentCount
-    FROM Transactions
-    GROUP BY payment_type, buyer_city
-    ORDER BY PaymentCount DESC;
+    SELECT country, COUNT(*) AS ChargebackCount
+    FROM Chargebacks
+    GROUP BY country
+    ORDER BY ChargebackCount DESC;
     """
-    chargebacks_analysis = pd.read_sql(query, con=engine)
-    print(chargebacks_analysis)
+    df = run_query(query)
+    df.plot(kind='bar', x='country', y='ChargebackCount', legend=False)
+    plt.title('Chargebacks by Country')
+    plt.xlabel('Country')
+    plt.ylabel('Number of Chargebacks')
+    plt.show()
 
-    logging.info('Chargebacks analysis completed successfully.')
+def plot_unsettled_by_reason():
+    query = """
+    SELECT reason, COUNT(*) AS UnsettledCount
+    FROM UnsettledTransactions
+    GROUP BY reason
+    ORDER BY UnsettledCount DESC;
+    """
+    df = run_query(query)
+    df.plot(kind='bar', x='reason', y='UnsettledCount', legend=False)
+    plt.title('Unsettled Transactions by Reason')
+    plt.xlabel('Reason')
+    plt.ylabel('Number of Unsettled Transactions')
+    plt.show()
 
-except Exception as e:
-    logging.error(f'Error occurred: {e}')
+if __name__ == "__main__":
+    orders = pd.read_csv('data/raw/olist_orders_dataset.csv')
+    payments = pd.read_csv('data/raw/olist_order_payments_dataset.csv')
+    customers = pd.read_csv('data/raw/olist_customers_dataset.csv')
+
+    generate_chargebacks(orders, payments, customers)
+    generate_unsettled_transactions(orders, payments, customers)
+
+    load_data_to_db('data/processed/chargebacks_cleaned.csv', 'Chargebacks')
+    load_data_to_db('data/processed/unsettled_transactions_cleaned.csv', 'UnsettledTransactions')
+
+    plot_chargeback_by_country()
+    plot_unsettled_by_reason()
